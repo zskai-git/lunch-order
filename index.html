@@ -212,6 +212,7 @@ svg{display:block;flex:none}
 
 /* thermal label + small tags */
 .tags{display:flex;flex-wrap:wrap;gap:4px}
+.tag.note{background:var(--yolk-soft);border-color:var(--yolk);color:var(--ink)}
 .tag{display:inline-block;padding:0 6px;border:1px solid var(--paper-line);background:var(--paper);color:var(--paper-ink);border-radius:4px;font-size:12px;line-height:1.6}
 .tlabel{background:var(--paper);color:var(--paper-ink);border:1px dashed var(--paper-line);border-radius:8px;padding:10px 12px;margin-top:16px;font-variant-numeric:tabular-nums}
 .tl-top{display:flex;justify-content:space-between;font-size:11.5px;letter-spacing:.08em;opacity:.75}
@@ -430,6 +431,11 @@ textarea.field{height:auto;min-height:150px;padding:10px 12px;line-height:1.6;re
 .mini:disabled{opacity:.25}
 .addrow{display:flex;align-items:center;gap:6px;justify-content:center;width:100%;height:42px;border-radius:12px;border:1.5px dashed var(--line);color:var(--leaf);font-weight:700;font-size:14px;margin-top:8px}
 .orow{padding-top:8px}
+.ocats{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px}
+.ocats .muted{font-size:12.5px;margin-right:2px}
+.ocats .chip{min-height:30px;font-size:13px;padding:0 10px}
+.defchip{flex:none;height:30px;padding:0 9px;border-radius:999px;border:1.5px solid var(--line);font-size:12px;font-weight:700;color:var(--muted)}
+.defchip.on{background:var(--leaf);border-color:var(--leaf);color:var(--on-leaf)}
 .szrow{display:flex;align-items:center;gap:6px;padding:2px 0 10px 4px;font-size:13px;color:var(--muted)}
 .szrow .field{width:64px;height:36px;padding:0 8px;text-align:center;font-size:16px;color:var(--ink)}
 .money-in span{max-width:2.6em;overflow:hidden;white-space:nowrap}
@@ -628,9 +634,14 @@ function splitSizes(s, type) {
 function cleanOptions(groups) {
   return (Array.isArray(groups) ? groups : []).map(g => ({
     name: String(g.name || '').trim().slice(0, 12), multi: !!g.multi, required: !!g.required,
-    items: (g.items || []).filter(i => String(i.label || '').trim()).slice(0, 30).map(i => ({ label: String(i.label).trim().slice(0, 12), add: Math.max(0, Math.round(+i.add || 0)) })),
-  })).filter(g => g.name && g.items.length).slice(0, 10);
+    cats: (Array.isArray(g.cats) ? g.cats : []).map(c => String(c).slice(0, 20)).filter(Boolean).slice(0, 30),
+    items: (g.items || []).filter(i => String(i.label || '').trim()).slice(0, 30).map(i => ({ label: String(i.label).trim().slice(0, 12), add: Math.max(0, Math.round(+i.add || 0)), def: !!i.def && !g.multi })),
+  })).filter(g => g.name && g.items.length).map(g => {      // 單選組最多一個預設值
+    let seen = false; g.items.forEach(i => { if (i.def) { if (seen) i.def = false; seen = true; } }); return g;
+  }).slice(0, 10);
 }
+const optionRows = (type, groups) => cleanOptions(groups).flatMap(g => g.items.map(i =>
+  Object.assign({ type, group: g.name, label: i.label, add: i.add, multi: g.multi, required: g.required }, i.def ? { def: true } : {}, g.cats.length ? { cats: g.cats } : {})));
 function cleanMembers(list) {
   return [...new Set((Array.isArray(list) ? list : []).map(n => String(n).trim().slice(0, 20)).filter(Boolean))].slice(0, 100);
 }
@@ -787,7 +798,7 @@ const Mock = (() => {
       need(p);
       const type = String(p.type || '');
       if (type !== '便當' && type !== '飲料' && !d.shops.some(s => s.name === type)) throw apiErr('NOSHOP', '找不到「' + type + '」');
-      d.options = d.options.filter(o => o.type !== type).concat(cleanOptions(p.groups).flatMap(g => g.items.map(i => ({ type, group: g.name, label: i.label, add: i.add, multi: g.multi, required: g.required }))));
+      d.options = d.options.filter(o => o.type !== type).concat(optionRows(type, p.groups));
       return { ok: true };
     },
     saveMembers(d, p) { need(p); d.members = cleanMembers(p.members); return { ok: true }; },
@@ -944,7 +955,7 @@ const Fire = (() => {
       need(p);
       const type = String(p.type || '');
       if (type !== '便當' && type !== '飲料' && !shopDoc(type)) throw apiErr('NOSHOP', '找不到「' + type + '」');
-      const rows = cleanOptions(p.groups).flatMap(g => g.items.map(i => ({ type, group: g.name, label: i.label, add: i.add, multi: g.multi, required: g.required })));
+      const rows = optionRows(type, p.groups);
       await metaUpdate(m => ({ members: m.members, options: m.options.filter(o => o.type !== type).concat(rows) }));
       return { ok: true };
     },
@@ -990,13 +1001,29 @@ function groupOpts(key) {
   const out = [];
   S.data.options.filter(o => o.type === key).forEach(o => {
     let g = out.find(x => x.name === o.group);
-    if (!g) { g = { name: o.group, multi: o.multi, required: o.required, items: [] }; out.push(g); }
-    g.items.push({ label: o.label, add: +o.add || 0 });
+    if (!g) { g = { name: o.group, multi: o.multi, required: o.required, items: [], def: '', cats: Array.isArray(o.cats) ? o.cats : [] }; out.push(g); }
+    g.items.push({ label: o.label, add: +o.add || 0, def: !!o.def });
+    if (o.def && !o.multi && !g.def) g.def = o.label;       // 單選組的預設值：沒選就當作選這個
   });
   return out;
 }
 const hasOwnOpts = name => !!name && S.data.options.some(o => o.type === name);
 const optionsFor = shop => hasOwnOpts(shop.name) ? groupOpts(shop.name) : groupOpts(shop.type);
+// 統計用：選項照選項組的順序排，單選組沒選的補上預設值（例如沒選麵就是「意麵」）
+// 選項組可以只套用到某些分類（例如「換麵體」只給鍋燒類）；沒設定 = 全部分類
+const appliesTo = (g, cat) => !g.cats || !g.cats.length || g.cats.includes(cat);
+function normOpts(shopName, opts, cat) {
+  const shop = S.data.shops.find(s => s.name === shopName) || { name: shopName, type: '便當' };
+  const out = [];
+  optionsFor(shop).forEach(g => {
+    if (!appliesTo(g, cat) && !g.items.some(i => (opts || []).includes(i.label))) return;
+    const chosen = g.items.filter(i => (opts || []).includes(i.label)).map(i => i.label);
+    if (!chosen.length && !g.multi && g.def && appliesTo(g, cat)) chosen.push(g.def);
+    out.push(...chosen);
+  });
+  (opts || []).forEach(o => { if (!out.includes(o)) out.push(o); });   // 已經不在選項清單裡的舊選項放最後
+  return out;
+}
 const sizesOf = m => splitSizes(m.sizes, (S.data.shops.find(s => s.name === m.shop) || {}).type);
 // 這家店菜單裡在不同分類重複出現的品名
 function dupNames(shop) {
@@ -1314,15 +1341,18 @@ function summarize(g) {
     // 買一送一拆成兩杯各自統計（兩杯口味可能不同），店家照杯數做
     const cups = l.bogo ? [l.opts || [], cup2Of(l)] : [l.opts || []];
     if (l.bogo) it.sets += l.qty;
-    cups.forEach((opts, ci) => {
-      const vk = [l.bogo ? BOGO : '', l.size, ...opts].filter(Boolean).join(' ');
+    // 一種規格 = 份量・選項（照選項組順序、單選沒選補預設）・備註；同樣規格合併計數，不列人名
+    cups.forEach(opts => {
+      const parts = [l.bogo ? BOGO : '', l.size, ...normOpts(g.shop, opts, l.cat)].filter(Boolean), note = String(l.note || '').trim();
+      const vk = parts.concat(note ? [note] : []).join('・');
       let v = it.vars.get(vk);
-      if (!v) { v = { label: vk, qty: 0, bogo: !!l.bogo, notes: [] }; it.vars.set(vk, v); }
-      v.qty += l.qty; if (l.note && ci === 0) v.notes.push(o.name + '：' + l.note);
+      if (!v) { v = { label: vk, parts, note, qty: 0, bogo: !!l.bogo }; it.vars.set(vk, v); }
+      v.qty += l.qty;
     });
   }));
   const idx = n => { const i = order.indexOf(n); return i < 0 ? 999 : i; };
-  const list = [...items.values()].sort((a, b) => idx(a.item) - idx(b.item)).map(it => Object.assign(it, { vars: [...it.vars.values()].sort((a, b) => b.qty - a.qty) }));
+  const list = [...items.values()].sort((a, b) => idx(a.item) - idx(b.item))
+    .map(it => Object.assign(it, { vars: [...it.vars.values()].sort((a, b) => b.qty - a.qty || a.label.localeCompare(b.label, 'zh-Hant')) }));
   const total = os.reduce((s, o) => s + o.total, 0), paid = os.reduce((s, o) => s + (+o.paid || 0), 0);
   const due = os.reduce((s, o) => s + Math.max(0, o.total - (+o.paid || 0)), 0);
   return { os, list, customs, total, paid, due, qty: list.reduce((s, i) => s + i.qty, 0) };
@@ -1330,12 +1360,13 @@ function summarize(g) {
 const customLine = c => `${c.name}：${c.text}${c.qty > 1 ? ' ×' + c.qty : ''}（做不到改：${c.fallback}）${c.note ? '　備註 ' + c.note : ''}`;
 function storeText(g) {
   const s = summarize(g), out = [`【${g.shop}】${fmtDate(g.deadline)} 共 ${s.qty} 份 ${money(s.total)}`];
+  out.push('');
   s.list.forEach(it => {
-    it.vars.forEach(v => {
-      out.push(`${it.item}${v.label ? ' ' + v.label : ''} ×${v.qty}${v.bogo ? ' 杯' : ''}`);
-      v.notes.forEach(n => out.push('　備註 ' + n));
-    });
-    if (it.sets) out.push(`　（${it.item} ${BOGO}共 ${it.sets} 組）`);
+    const unit = it.sets ? ' 杯' : '';
+    out.push(`${it.item} ×${it.qty}${unit}`);
+    // 只有一種、而且沒有任何規格：品名那行就夠了
+    if (!(it.vars.length === 1 && !it.vars[0].label)) it.vars.forEach(v => out.push(`　${v.label || '（一般）'} ×${v.qty}${v.bogo ? ' 杯' : ''}`));
+    if (it.sets) out.push(`　（${BOGO}共 ${it.sets} 組）`);
   });
   if (s.customs.length) out.push('', `【${CUSTOM}，請先問店家能不能做】`, ...s.customs.map(customLine));
   return out.join('\n');
@@ -1356,9 +1387,9 @@ function statsHtml(g) {
     <div class="block">
       <div class="block-h"><h3>給店家</h3><small>依品項合計</small><span class="spacer"></span><button class="sbtn" data-act="copy">${I.copy}複製</button></div>
       ${s.list.map(it => {
-        const simple = it.vars.length === 1 && !it.vars[0].label && !it.vars[0].notes.length;
-        return `<div class="srow"><span class="nm">${esc(it.item)}</span><span class="q">×${it.qty}</span></div>` + (simple ? '' :
-          `<div class="svars">${it.vars.map(v => `<div class="svar">${v.label ? `<span class="tags">${v.label.split(' ').map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : '<span class="muted">一般</span>'}<span class="q">×${v.qty}${v.bogo ? ' 杯' : ''}</span></div>${v.notes.map(n => `<div class="snote">備註 ${esc(n)}</div>`).join('')}`).join('')}${it.sets ? `<div class="snote">${BOGO}共 ${it.sets} 組</div>` : ''}</div>`);
+        const simple = it.vars.length === 1 && !it.vars[0].label;
+        return `<div class="srow"><span class="nm">${esc(it.item)}</span><span class="q">×${it.qty}${it.sets ? ' 杯' : ''}</span></div>` + (simple ? '' :
+          `<div class="svars">${it.vars.map(v => `<div class="svar"><span class="tags">${v.parts.length || v.note ? v.parts.map(t => `<span class="tag">${esc(t)}</span>`).join('') + (v.note ? `<span class="tag note">${esc(v.note)}</span>` : '') : '<span class="muted">（一般）</span>'}</span><span class="q">×${v.qty}${v.bogo ? ' 杯' : ''}</span></div>`).join('')}${it.sets ? `<div class="snote">${BOGO}共 ${it.sets} 組</div>` : ''}</div>`);
       }).join('')}
       ${s.customs.length ? `<div class="custom-sec"><div class="cs-h"><span class="ctag">${CUSTOM}</span>先問店家能不能做，做不到就改點備案</div>
         ${s.customs.map(c => `<div class="cs-row"><b>${esc(c.name)}</b>：${esc(c.text)}${c.qty > 1 ? ' ×' + c.qty : ''}<div class="fallback">做不到改點：${esc(c.fallback)}</div>${c.note ? `<div class="snote">備註 ${esc(c.note)}</div>` : ''}</div>`).join('')}</div>` : ''}
@@ -1525,7 +1556,7 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
   const g = S.data.groups.find(x => x.id === gid); if (!g || !isOpen(g)) return;
   if (!S.me) return askName(() => openItem(gid, itemName, editIdx, cat, customIn));
   const shop = shopOf(g), m = findMenu(g.shop, { item: itemName, cat }); if (!m) return;
-  const drink = shop.type === '飲料', groups = optionsFor(shop);
+  const drink = shop.type === '飲料', groups = optionsFor(shop).filter(gr => appliesTo(gr, m.cat));
   const base = editIdx != null ? myLines(gid)[editIdx] : null;
   const custom = customIn || (base && base.custom) || null;
   const sz = sizesOf(m), disc = parseDisc(m.disc), pr = custom ? null : promoOf(g, m), label = labelOf(g.shop, m);
@@ -1535,7 +1566,8 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
   st.bogo = !!pr && (pr.only || (base ? !!base.bogo : true));
   st.same = !base || !cupsDiffer(base);
   if (st.bogo && prSize) st.size = prSize;
-  [1, 2].forEach(c => groups.forEach(gr => { st.sel[c][gr.name] = new Set(); }));
+  // 新點的：單選組有預設值就先幫忙選好（例如麵體預設意麵）
+  [1, 2].forEach(c => groups.forEach(gr => { st.sel[c][gr.name] = new Set(!base && !gr.multi && gr.def ? [gr.def] : []); }));
   const load = (c, list) => list.forEach(o => { const gr = groups.find(x => x.items.some(i => i.label === o)); if (gr) st.sel[c][gr.name].add(o); });
   if (base) { load(1, base.opts); load(2, cup2Of(base)); }
   const raw = s => (m.priceL && s === sz[1] ? m.priceL : m.price);
@@ -2076,7 +2108,7 @@ function openImport() {
 }
 
 // type = 便當／飲料（共用選項）或店名（專屬選項）
-const cloneGroups = gs => gs.map(g => ({ name: g.name, multi: g.multi, required: g.required, items: g.items.map(i => ({ label: i.label, add: i.add ? String(i.add) : '' })) }));
+const cloneGroups = gs => gs.map(g => ({ name: g.name, multi: g.multi, required: g.required, cats: (g.cats || []).slice(), items: g.items.map(i => ({ label: i.label, add: i.add ? String(i.add) : '', def: !!i.def })) }));
 function loadOpt(type) {
   const shared = type === '便當' || type === '飲料', groups = groupOpts(type);
   S.opt = { type, shared, own: shared || groups.length > 0, dirty: false, saving: false, groups: cloneGroups(groups) };
@@ -2091,12 +2123,16 @@ function aOptionsHtml() {
     <div class="hint">這家店的甜度、冰塊或加料跟別家不一樣的話，可以幫它建一套專屬選項，不會影響其他店。</div>
     <button class="btn" style="width:100%;margin-top:14px" data-act="opt-own">建立專屬選項（先複製共用的來改）</button></div>`;
   h += `<div class="hint" style="margin:8px 2px 0">${O.shared ? `套用到所有沒有專屬選項的「${esc(O.type)}」店家` : `只套用到「${esc(O.type)}」`}，點餐時照這個順序顯示。「必選」的沒選就不能加入。</div>`;
+  const shopCats = O.shared ? [] : [...new Set(menuOf(O.type).map(m => m.cat || '其他'))];
   return h + `${O.groups.map((g, gi) => `<div class="ecat">
     <div class="ecat-h"><input class="field" data-f="gname" data-gi="${gi}" maxlength="12" value="${esc(g.name)}" placeholder="選項組名稱，例如：甜度" aria-label="選項組名稱">
       <button class="mini" data-act="og-up" data-gi="${gi}" ${gi ? '' : 'disabled'} aria-label="上移">${I.up}</button><button class="mini" data-act="og-down" data-gi="${gi}" ${gi < O.groups.length - 1 ? '' : 'disabled'} aria-label="下移">${I.down}</button><button class="mini del" data-act="og-del" data-gi="${gi}" aria-label="刪除選項組">${I.x}</button></div>
     <div class="chips sm"><button class="chip ${g.multi ? '' : 'on'}" data-act="og-multi" data-gi="${gi}" data-v="0">單選</button><button class="chip ${g.multi ? 'on' : ''}" data-act="og-multi" data-gi="${gi}" data-v="1">可複選</button><button class="chip ${g.required ? 'on' : ''}" data-act="og-req" data-gi="${gi}">${g.required ? I.check : ''}必選</button></div>
+    ${O.shared ? '' : `<div class="ocats"><span class="muted">套用到</span><button class="chip ${g.cats.length ? '' : 'on'}" data-act="og-cat" data-gi="${gi}" data-v="">全部分類</button>${shopCats.map(c => `<button class="chip ${g.cats.includes(c) ? 'on' : ''}" data-act="og-cat" data-gi="${gi}" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>`}
     ${g.items.map((it, ii) => `<div class="orow" data-gi="${gi}" data-ii="${ii}"><input class="field" data-f="label" maxlength="12" value="${esc(it.label)}" placeholder="例如：半糖" aria-label="選項">
-      <label class="money-in"><span>+$</span><input data-f="add" inputmode="numeric" value="${esc(it.add)}" placeholder="0" aria-label="加價"></label><button class="mini del" data-act="oi-del" aria-label="刪除選項">${I.x}</button></div>`).join('')}
+      <label class="money-in"><span>+$</span><input data-f="add" inputmode="numeric" value="${esc(it.add)}" placeholder="0" aria-label="加價"></label>
+      ${g.multi ? '' : `<button class="defchip ${it.def ? 'on' : ''}" data-act="oi-def" aria-label="設為預設">預設</button>`}<button class="mini del" data-act="oi-del" aria-label="刪除選項">${I.x}</button></div>`).join('')}
+    ${g.multi ? '' : `<div class="hint" style="margin-top:6px">單選組可以把一個選項設成「預設」：點餐時先幫大家選好，沒改就算這個，統計也會照寫，例如麵體預設「意麵」。</div>`}
     <button class="addrow" data-act="oi-add" data-gi="${gi}">${I.plusSm}新增選項</button>
   </div>`).join('')}
   <button class="btn ghost" style="width:100%;margin-top:12px" data-act="og-add">${I.plusSm}新增選項組</button>
@@ -2262,6 +2298,11 @@ const ADMIN_ACT = {
     edChange(() => S.opt.groups.splice(+el.dataset.gi, 1));
   },
   'og-multi': el => edChange(() => { S.opt.groups[+el.dataset.gi].multi = el.dataset.v === '1'; }),
+  // 套用分類：按「全部分類」清空；按某個分類切換有沒有包含
+  'og-cat': el => edChange(() => {
+    const g = S.opt.groups[+el.dataset.gi], v = el.dataset.v;
+    if (!v) g.cats = []; else g.cats = g.cats.includes(v) ? g.cats.filter(c => c !== v) : g.cats.concat(v);
+  }),
   'og-req': el => edChange(() => { const g = S.opt.groups[+el.dataset.gi]; g.required = !g.required; }),
   'og-add': () => { edChange(() => S.opt.groups.push({ name: '', multi: false, required: false, items: [{ label: '', add: '' }] })); focusLater(`[data-f="gname"][data-gi="${S.opt.groups.length - 1}"]`); },
   'oi-add': el => {
@@ -2269,6 +2310,8 @@ const ADMIN_ACT = {
     focusLater(`.orow[data-gi="${gi}"][data-ii="${S.opt.groups[gi].items.length - 1}"] [data-f="label"]`);
   },
   'oi-del': el => { const r = rowOf(el); edChange(() => S.opt.groups[r.gi].items.splice(r.ii, 1)); },
+  // 預設值：同一組只能有一個，再按一次取消
+  'oi-def': el => { const r = rowOf(el); edChange(() => { S.opt.groups[r.gi].items.forEach((it, i) => { it.def = i === r.ii ? !it.def : false; }); }); },
   'mem-add': () => {
     const inp = $('#mem-in'), names = inp.value.split(/[\s,，、]+/).map(s => s.trim()).filter(Boolean);
     if (!names.length) return;

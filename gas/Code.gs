@@ -316,6 +316,28 @@ function dupNames_(menu) {
   return d;
 }
 function label_(x, dups) { return x.cat && dups[x.item] ? x.cat + ' ' + x.item : x.item; }
+// 選項照選項組的順序排，單選組沒選的補上預設值（跟網頁統計一樣）
+function normOpts_(d, shopName, opts, cat) {
+  opts = opts || [];
+  const shop = d.shops.filter(s => s.name === shopName)[0] || { type: '便當' };
+  const own = d.options.some(o => o.type === shopName);
+  const rows = d.options.filter(o => o.type === (own ? shopName : shop.type)), groups = [];
+  rows.forEach(o => {
+    let g = groups.filter(x => x.name === o.group)[0];
+    if (!g) { g = { name: o.group, multi: !!o.multi, labels: [], def: '', cats: o.cats || [] }; groups.push(g); }
+    g.labels.push(o.label);
+    if (o.def && !o.multi && !g.def) g.def = o.label;
+  });
+  const out = [];
+  groups.forEach(g => {
+    const applies = !g.cats.length || g.cats.indexOf(cat) >= 0;    // 選項組只套用到某些分類（例如換麵體只給鍋燒類）
+    const chosen = g.labels.filter(x => opts.indexOf(x) >= 0);
+    if (!chosen.length && !g.multi && g.def && applies) chosen.push(g.def);
+    chosen.forEach(x => out.push(x));
+  });
+  opts.forEach(x => { if (out.indexOf(x) < 0) out.push(x); });
+  return out;
+}
 
 /* ================= LINE Bot ================= */
 
@@ -401,16 +423,17 @@ function summarize_(g, d) {
     if (l.bogo) it.sets += l.qty;
     // 買一送一拆成兩杯各自統計（兩杯甜度冰塊可能不同），店家照杯數做
     const cups = l.bogo ? [l.opts || [], cup2_(l)] : [l.opts || []];
-    cups.forEach((opts, ci) => {
-      const vk = [l.bogo ? '買一送一' : '', l.size].concat(opts).filter(String).join(' ');
-      const v = it.vars[vk] || (it.vars[vk] = { label: vk, qty: 0, bogo: !!l.bogo, notes: [] });
+    // 一種規格 = 份量・選項（照選項組順序、單選沒選補預設）・備註；同樣規格合併計數，不列人名
+    cups.forEach(opts => {
+      const note = String(l.note || '').trim();
+      const vk = [l.bogo ? '買一送一' : '', l.size].concat(normOpts_(d, g.shop, opts, l.cat), note ? [note] : []).filter(String).join('・');
+      const v = it.vars[vk] || (it.vars[vk] = { label: vk, qty: 0, bogo: !!l.bogo });
       v.qty += l.qty;
-      if (l.note && ci === 0) v.notes.push(o.name + '：' + l.note);
     });
   }));
   const idx = n => { const i = order.indexOf(n); return i < 0 ? 999 : i; };
   const list = Object.keys(items).map(k => items[k]).sort((a, b) => idx(a.item) - idx(b.item)).map(it => {
-    it.vars = Object.keys(it.vars).map(k => it.vars[k]).sort((a, b) => b.qty - a.qty);
+    it.vars = Object.keys(it.vars).map(k => it.vars[k]).sort((a, b) => b.qty - a.qty || (a.label < b.label ? -1 : 1));
     return it;
   });
   let total = 0, paid = 0, due = 0, qty = 0;
@@ -483,10 +506,9 @@ function bubble_(g, d) {
   const itemRows = [];
   s.list.slice(0, 25).forEach(it => {
     const simple = it.vars.length === 1 && !it.vars[0].label;
-    itemRows.push(row(it.item, '×' + it.qty, { l: { weight: 'bold' }, r: { weight: 'bold' } }));
-    if (!simple) it.vars.forEach(v => itemRows.push(row('　' + (v.label || '一般'), '×' + v.qty + (v.bogo ? ' 杯' : ''), { l: { color: muted, size: 'xs' }, r: { color: muted, size: 'xs' } })));
+    itemRows.push(row(it.item, '×' + it.qty + (it.sets ? ' 杯' : ''), { l: { weight: 'bold' }, r: { weight: 'bold' } }));
+    if (!simple) it.vars.forEach(v => itemRows.push(row('　' + (v.label || '（一般）'), '×' + v.qty + (v.bogo ? ' 杯' : ''), { l: { color: muted, size: 'xs' }, r: { color: muted, size: 'xs' } })));
     if (it.sets) itemRows.push(txt('　買一送一共 ' + it.sets + ' 組', { size: 'xxs', color: muted }));
-    it.vars.forEach(v => v.notes.forEach(n => itemRows.push(txt('　備註 ' + n, { size: 'xxs', color: muted }))));
   });
   if (s.customs.length) {
     itemRows.push({ type: 'separator', margin: 'lg' }, title('客製點餐（先問店家能不能做）'));
