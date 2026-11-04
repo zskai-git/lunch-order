@@ -137,6 +137,7 @@ svg{display:block;flex:none}
 .sugg:active{background:var(--surface-2)}
 .sugg + .sugg{border-top:1px solid var(--line)}
 .sugg small{margin-left:auto;color:var(--muted);font-size:12px;font-weight:400}
+.closed-tag{flex:none;padding:1px 7px;border-radius:99px;background:var(--surface-2);color:var(--muted);font-size:11px;font-weight:600}
 .sbtn.dice-btn{color:var(--on-yolk);background:var(--yolk);border-color:var(--yolk)}
 .sect-h .sbtn{height:32px;font-size:13px;padding:0 10px}
 .rand-hero{width:64px;height:64px;margin:6px auto 10px;border-radius:18px;background:var(--yolk);color:var(--on-yolk);display:grid;place-items:center}
@@ -511,6 +512,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const now = () => Date.now();
 const pad = n => String(n).padStart(2, '0');
 const WEEK = '日一二三四五六';
+// 店家每週固定公休日：0 = 週日 … 6 = 週六
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const cleanClosed = list => WEEK_ORDER.filter(d => (Array.isArray(list) ? list : []).map(Number).includes(d));
+const closedToday = s => cleanClosed(s.closed).includes(new Date().getDay());
+const closedText = s => { const c = cleanClosed(s.closed); return c.length ? c.map(d => '週' + WEEK[d]).join('、') + '公休' : ''; };
 const fmtTime = ms => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const fmtDate = ms => { const d = new Date(ms); return (d.getMonth() + 1) + '/' + d.getDate() + '（' + WEEK[d.getDay()] + '）'; };
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
@@ -776,7 +782,7 @@ const Mock = (() => {
       if (d.shops.some(x => x.name === name && x.name !== orig)) throw apiErr('DUP', '已經有「' + name + '」了');
       const type = s.type === '飲料' ? '飲料' : '便當', items = cleanItems(p.items, type);
       if (!items.length) throw apiErr('BAD', '菜單至少要有一個品項');
-      const info = { name, type, phone: String(s.phone || '').slice(0, 30), note: String(s.note || '').slice(0, 60), disabled: !!s.disabled };
+      const info = { name, type, phone: String(s.phone || '').slice(0, 30), note: String(s.note || '').slice(0, 60), disabled: !!s.disabled, closed: cleanClosed(s.closed) };
       if (orig) {
         const cur = d.shops.find(x => x.name === orig); if (!cur) throw apiErr('NOSHOP', '找不到「' + orig + '」');
         Object.assign(cur, info);
@@ -855,7 +861,7 @@ const Fire = (() => {
   function view() {
     const shops = raw.shops.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     return {
-      shops: shops.map(s => ({ name: s.name, type: s.type, phone: s.phone || '', note: s.note || '', disabled: !!s.disabled })),
+      shops: shops.map(s => ({ name: s.name, type: s.type, phone: s.phone || '', note: s.note || '', disabled: !!s.disabled, closed: cleanClosed(s.closed) })),
       menu: shops.flatMap(s => (s.menu || []).map(m => Object.assign({ shop: s.name }, m))),
       options: raw.meta.options || [], members: raw.meta.members || [],
       groups: raw.groups.map(g => ({ id: g.id, shop: g.shop, deadline: g.deadline, status: g.status, note: g.note || '', createdAt: g.createdAt || 0, promos: g.promos || [] })),
@@ -932,7 +938,7 @@ const Fire = (() => {
       const type = sh.type === '飲料' ? '飲料' : '便當', menu = cleanItems(p.items, type);
       if (!menu.length) throw apiErr('BAD', '菜單至少要有一個品項');
       const cur = orig ? shopDoc(orig) : null; if (orig && !cur) throw apiErr('NOSHOP', '找不到「' + orig + '」');
-      const data = { name, type, phone: String(sh.phone || '').slice(0, 30), note: String(sh.note || '').slice(0, 60), disabled: !!sh.disabled, menu, createdAt: cur ? (cur.createdAt || now()) : now(), updatedAt: now() };
+      const data = { name, type, phone: String(sh.phone || '').slice(0, 30), note: String(sh.note || '').slice(0, 60), disabled: !!sh.disabled, closed: cleanClosed(sh.closed), menu, createdAt: cur ? (cur.createdAt || now()) : now(), updatedAt: now() };
       const b = fs.writeBatch(db);
       b.set(cur ? fs.doc(db, 'shops', cur.id) : fs.doc(fs.collection(db, 'shops')), data);
       if (orig && orig !== name) {      // 改店名：開過的團一起改，菜單才對得上
@@ -1788,8 +1794,9 @@ const OTYPES = ['便當', '飲料'];
 /* ================= 隨機開團：不知道吃什麼的時候，交給運氣 ================= */
 async function randomOpen() {
   if (!(await needPin())) return;
-  const pool = t => S.data.shops.filter(s => s.type === t && !s.disabled);
-  if (!pool('便當').length) { closeSheet(); return toast('還沒有便當店，先到「管理 → 店家」新增'); }
+  const all = t => S.data.shops.filter(s => s.type === t && !s.disabled), pool = t => all(t).filter(s => !closedToday(s));
+  if (!all('便當').length) { closeSheet(); return toast('還沒有便當店，先到「管理 → 店家」新增'); }
+  if (!pool('便當').length) { closeSheet(); return toast('便當店今天都公休，沒有店可以抽'); }
   openSheet('rand', `<div class="rand-hero">${I.dice}</div>
     <h2 class="sh-h" style="text-align:center">隨機開團</h2>
     <div class="sh-sub" style="text-align:center">不知道吃什麼？交給運氣決定。</div>
@@ -1797,15 +1804,16 @@ async function randomOpen() {
       <button class="btn" data-r="0">${ART.bento.replace('class="art"', 'class="art sm"')}只抽便當</button>
       <button class="btn ghost" data-r="1" ${pool('飲料').length ? '' : 'disabled'}>${ART.bento.replace('class="art"', 'class="art sm"')}${ART.tea.replace('class="art"', 'class="art sm"')}便當＋飲料</button>
     </div>
-    ${pool('飲料').length ? '' : '<div class="hint" style="text-align:center">還沒有飲料店，只能抽便當</div>'}`, {
+    ${pool('飲料').length ? '' : `<div class="hint" style="text-align:center">${all('飲料').length ? '飲料店今天都公休' : '還沒有飲料店'}，只能抽便當</div>`}`, {
     mount(root) { root.addEventListener('click', e => { const b = e.target.closest('[data-r]'); if (b && !b.disabled) spinShops(b.dataset.r === '1', {}); }); },
   });
 }
-// 抽一家：避開暫停的店、今天已經在開的店；重抽時盡量不要跟上一次一樣
+// 抽一家：避開暫停的店、今天公休的店、今天已經在開的店；重抽時盡量不要跟上一次一樣
 function drawShop(type, avoid) {
   const busy = new Set(S.data.groups.filter(isOpen).map(g => g.shop));
-  let pool = S.data.shops.filter(s => s.type === type && !s.disabled && !busy.has(s.name));
-  if (!pool.length) pool = S.data.shops.filter(s => s.type === type && !s.disabled);
+  const usable = S.data.shops.filter(s => s.type === type && !s.disabled && !closedToday(s));
+  let pool = usable.filter(s => !busy.has(s.name));
+  if (!pool.length) pool = usable;
   if (pool.length > 1 && avoid) pool = pool.filter(s => s.name !== avoid);
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -1827,7 +1835,7 @@ function spinShops(withDrink, last) {
       const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
       let done = 0;
       types.forEach((t, ti) => {
-        const el = $(`[data-rn="${t}"]`, root), names = S.data.shops.filter(s => s.type === t && !s.disabled).map(s => s.name);
+        const el = $(`[data-rn="${t}"]`, root), names = S.data.shops.filter(s => s.type === t && !s.disabled && !closedToday(s)).map(s => s.name);
         const land = () => {
           el.textContent = picks[t].name; el.classList.remove('tick'); el.classList.add('land');
           $(`[data-rt="${t}"]`, root).hidden = false;
@@ -1892,12 +1900,12 @@ function suggestHtml(type) {
   const lastUsed = name => Math.max(0, ...S.data.groups.filter(g => g.shop === name).map(g => g.deadline));
   const list = S.data.shops.filter(s => s.type === type && !s.disabled)
     .map(s => ({ s, score: fuzzy(s.name, F.q), used: lastUsed(s.name) }))
-    .filter(x => x.score > 0).sort((a, b) => b.score - a.score || b.used - a.used || a.s.name.localeCompare(b.s.name, 'zh-Hant'));
+    .filter(x => x.score > 0).sort((a, b) => closedToday(a.s) - closedToday(b.s) || b.score - a.score || b.used - a.used || a.s.name.localeCompare(b.s.name, 'zh-Hant'));
   if (!list.length) return `<div class="sugg-empty">${F.q ? '找不到「' + esc(F.q) + '」' : '還沒有' + type + '店，先到「店家」新增'}</div>`;
   // 沒打字：只列最近常開的 4 家，其餘收在「看更多」；有打字：列出所有符合的
   const k = 'sugg-' + type, shown = F.q || S.expand[k] ? list : list.slice(0, 4);
   return shown.map(x => `<button class="sugg" data-act="o-pick" data-type="${type}" data-shop="${esc(x.s.name)}">
-    <span class="glyph xs ${type === '飲料' ? 'drink' : 'bento'}">${type === '飲料' ? ART.tea : ART.bento}</span><span>${esc(x.s.name)}</span>${x.s.phone ? `<small>${esc(x.s.phone)}</small>` : ''}</button>`).join('')
+    <span class="glyph xs ${type === '飲料' ? 'drink' : 'bento'}">${type === '飲料' ? ART.tea : ART.bento}</span><span>${esc(x.s.name)}</span>${closedToday(x.s) ? '<span class="closed-tag">今天公休</span>' : ''}${x.s.phone ? `<small>${esc(x.s.phone)}</small>` : ''}</button>`).join('')
     + (F.q ? '' : moreBtn(k, list.length));
 }
 // 「看更多／收起」：超過 4 項才出現，預設收起
@@ -1961,7 +1969,7 @@ function aShopsHtml() {
     const n = menuOf(s.name).length, drink = s.type === '飲料';
     return `<button class="scard ${s.disabled ? 'off' : ''}" data-act="edit-shop" data-name="${esc(s.name)}">
       <span class="glyph sm ${drink ? 'drink' : 'bento'}">${drink ? ART.tea : ART.bento}</span>
-      <span class="sc-b"><b>${esc(s.name)}</b><small class="num">${n} 個品項${s.phone ? ' · ' + esc(s.phone) : ''}</small></span>
+      <span class="sc-b"><b>${esc(s.name)}</b><small class="num">${n} 個品項${s.phone ? ' · ' + esc(s.phone) : ''}${closedText(s) ? ' · ' + closedText(s) : ''}</small></span>
       ${s.disabled ? '<span class="st unpaid">暫停</span>' : ''}${I.chev}</button>`;
   };
   // 便當、飲料分兩區，每區先列 4 家，其餘收在「看更多」
@@ -1987,7 +1995,7 @@ function startEdit(name) {
     c.items.push({ item: m.item, price: String(m.price), priceL: m.priceL ? String(m.priceL) : '', desc: m.desc || '' });
   });
   if (!cats.length) cats.push({ name: '主餐', sizes: defSizes(s ? s.type : '便當'), disc: blankDisc(), items: [blankItem()] });
-  S.edit = { orig: s ? s.name : null, shop: { name: s ? s.name : '', type: s ? s.type : '便當', phone: s ? s.phone || '' : '', note: s ? s.note || '' : '', disabled: !!(s && s.disabled) }, cats, dirty: false, saving: false };
+  S.edit = { orig: s ? s.name : null, shop: { name: s ? s.name : '', type: s ? s.type : '便當', phone: s ? s.phone || '' : '', note: s ? s.note || '' : '', disabled: !!(s && s.disabled), closed: cleanClosed(s && s.closed) }, cats, dirty: false, saving: false };
   location.hash = 'shop';
 }
 
@@ -2001,6 +2009,8 @@ function shopEditHtml() {
     <div class="hint">${hasOwnOpts(E.orig) ? '這家店使用自己的專屬選項' : `點餐時使用「${s.type}」共用選項（${esc(groupOpts(s.type).map(g => g.name).join('、') || '目前是空的')}）`}，可以到「選項」修改。</div>
     <label class="lbl" for="ed-phone">電話</label><input class="field" id="ed-phone" data-f="phone" type="tel" maxlength="30" value="${esc(s.phone)}" placeholder="選填">
     <label class="lbl" for="ed-note">備註</label><input class="field" id="ed-note" data-f="note" maxlength="60" value="${esc(s.note)}" placeholder="選填，例如：滿 10 杯外送">
+    <label class="lbl">公休日</label><div class="chips sm">${WEEK_ORDER.map(d => `<button class="chip ${s.closed.includes(d) ? 'on' : ''}" data-act="ed-closed" data-v="${d}">週${WEEK[d]}</button>`).join('')}</div>
+    <div class="hint">每週固定公休的日子，可以複選，不選就是沒有公休。公休當天不會被隨機抽到，手動開團會先提醒。</div>
     <div class="switch-row"><span><b>暫停使用</b><small>開團時看不到這家店，菜單會保留</small></span><button class="tog ${s.disabled ? 'on' : ''}" data-act="ed-disable" aria-label="暫停使用"></button></div>
   </div>
   <div class="sect-h"><h2>菜單</h2><span class="num">${n} 個品項</span><span class="spacer"></span><button class="sbtn" data-act="ed-import">貼上匯入</button></div>
@@ -2194,7 +2204,12 @@ const ADMIN_ACT = {
     if (k.indexOf('sugg-') === 0) { const t = k.slice(5), box = $(`[data-sugg="${t}"]`); if (box) box.innerHTML = suggestHtml(t); }   // 只重畫清單，搜尋框不受影響
     else renderMain();
   },
-  'o-pick': el => { const F = S.openForm[el.dataset.type]; F.shop = el.dataset.shop; F.q = ''; F.promos = []; repaintOpen(); },
+  'o-pick': async el => {
+    const t = el.dataset.type, name = el.dataset.shop, shop = S.data.shops.find(s => s.name === name);
+    // 今天公休只提醒，不擋：店家可能臨時有營業
+    if (shop && closedToday(shop) && !(await confirmSheet('這家今天公休', '「' + name + '」' + closedText(shop) + '，確定要開嗎？', '還是要開'))) return;
+    const F = S.openForm[t]; F.shop = name; F.q = ''; F.promos = []; repaintOpen();
+  },
   'o-clear': el => { const F = S.openForm[el.dataset.type]; F.shop = ''; F.promos = []; repaintOpen(); focusLater(`[data-f="osq"][data-type="${el.dataset.type}"]`); },
   'promo-add': el => {
     const t = el.dataset.type, v = $(`[data-f="opitem"][data-type="${t}"]`).value;
@@ -2249,6 +2264,10 @@ const ADMIN_ACT = {
   'to-admin': () => { location.hash = 'admin'; },
   'save-edit': () => (S.view === 'shop' ? saveShop() : S.adminTab === 'options' ? saveOptions() : saveMembers()),
   'ed-type': el => edChange(() => { S.edit.shop.type = el.dataset.v; }),
+  'ed-closed': el => edChange(() => {
+    const d = +el.dataset.v, c = S.edit.shop.closed;
+    S.edit.shop.closed = cleanClosed(c.includes(d) ? c.filter(x => x !== d) : c.concat(d));
+  }),
   'ed-disable': () => edChange(() => { S.edit.shop.disabled = !S.edit.shop.disabled; }),
   'ed-import': () => openImport(),
   'ec-up': el => edChange(() => swap(S.edit.cats, +el.dataset.ci, +el.dataset.ci - 1)),
