@@ -1310,6 +1310,11 @@ function menuHtml(g) {
   return h;
 }
 
+// 顯示用：沒動過的單選選項補上預設值，跟統計一致（不影響訂單本身）
+function shownTags(shop, l) {
+  const o1 = [...new Set(normOpts(shop, l.opts, l.cat))], o2 = [...new Set(normOpts(shop, cup2Of(l), l.cat))];
+  return [l.bogo ? BOGO : '', l.size, ...o1, ...(cupsDiffer(l) ? ['第2杯：' + o2.join(' ')] : [])].filter(Boolean);
+}
 function peopleHtml(g) {
   const open = isOpen(g);
   const os = ordersOf(g.id).slice().sort((a, b) => (a.name === S.me ? -1 : b.name === S.me ? 1 : (a.updatedAt || 0) - (b.updatedAt || 0)));
@@ -1324,7 +1329,7 @@ function peopleHtml(g) {
       <div class="phead">${avatar(o.name)}<b>${esc(o.name)}</b>${me ? '<span class="metag">你</span>' : ''}${o.updatedAt ? `<small class="num">${fmtTime(o.updatedAt)}</small>` : ''}<span class="spacer"></span><span class="price">${money(o.total)}</span></div>
       <div class="plines">${o.lines.map((l, i) => `<div class="pline">
         <div class="pl-main"><div class="pl-name">${l.custom ? `<span class="ctag">${CUSTOM}</span>${esc(l.custom.text)}` : esc(labelOf(g.shop, l))}${l.qty > 1 || l.bogo ? ` <span class="muted num">${qtyText(l)}</span>` : ''}</div>
-          ${l.custom ? `<div class="fallback">做不到改點：${esc(fallbackText(g.shop, l))}</div>` : variantText(l) ? `<div class="tags">${tagsOf(l).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : ''}
+          ${l.custom ? `<div class="fallback">做不到改點：${esc(fallbackText(g.shop, l))}</div>` : (tg => tg.length ? `<div class="tags">${tg.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : '')(shownTags(g.shop, l))}
           ${l.note ? `<div class="pl-note">備註：${esc(l.note)}</div>` : ''}</div>
         ${!me && open ? `<button class="follow" data-act="follow" data-name="${esc(o.name)}" data-idx="${i}">${I.plusSm}跟點</button>` : ''}
       </div>`).join('')}</div>
