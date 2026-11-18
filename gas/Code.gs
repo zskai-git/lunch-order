@@ -117,7 +117,12 @@ const ACTIONS = {
     const promos = (Array.isArray(p.promos) ? p.promos : []).filter(x => {
       if (!x || !items.some(m => sameItem_(m, x))) return false;
       const k = (x.cat || '') + '|' + x.item; if (seen[k]) return false; seen[k] = true; return true;
-    }).slice(0, 20).map(x => ({ item: String(x.item), cat: String(x.cat || '').slice(0, 20), only: !!x.only, size: String(x.size || '').trim().slice(0, 6) }));
+    }).slice(0, 20).map(x => {
+      const o = { item: String(x.item), cat: String(x.cat || '').slice(0, 20), only: !!x.only, size: String(x.size || '').trim().slice(0, 6) };
+      // 買 A 送 B：gift 是 B
+      if (x.gift && x.gift.item && items.some(m => sameItem_(m, x.gift))) o.gift = { item: String(x.gift.item), cat: String(x.gift.cat || '').slice(0, 20), size: String(x.gift.size || '').trim().slice(0, 6) };
+      return o;
+    });
     const sh = sheet_('groups');
     sh.getRange(1, 1, 1, HEAD.groups.length).setValues([HEAD.groups]).setFontWeight('bold').setBackground('#DDEFE3');
     sh.appendRow([id, shop, new Date(dl), ST_OPEN, String(p.note || '').slice(0, 80), new Date(), '', promos.length ? JSON.stringify(promos) : '']);
@@ -417,8 +422,20 @@ function summarize_(g, d) {
   os.forEach(o => o.lines.forEach(l => {
     // 客製點餐另外列，不混進品項合計（要先問店家能不能做）
     if (l.custom) { customs.push({ name: o.name, text: l.custom.text, qty: l.qty, fallback: fallback_(l, dups) }); return; }
-    const name = label_(l, dups);       // 同名不同分類的會帶分類，例如「鍋燒類 拉麵」
-    const it = items[name] || (items[name] = { item: name, qty: 0, sets: 0, vars: {} });
+    const itemOf = x => { const name = label_(x, dups); return items[name] || (items[name] = { item: name, qty: 0, sets: 0, vars: {} }); };   // 同名不同分類的會帶分類，例如「鍋燒類 拉麵」
+    const addVar = (it, parts) => {
+      const note = String(l.note || '').trim(), vk = parts.concat(note ? [note] : []).filter(String).join('・');
+      const v = it.vars[vk] || (it.vars[vk] = { label: vk, qty: 0, bogo: false });
+      v.qty += l.qty;
+    };
+    const gf = gift_(l);
+    if (gf) {   // 買 A 送 B：A 照一般的算，B 算在 B 自己的品項下面、標「贈品」
+      const a = itemOf(l), b = itemOf(gf);
+      a.qty += l.qty; addVar(a, [l.size].concat(normOpts_(d, g.shop, l.opts || [], l.cat)));
+      b.qty += l.qty; addVar(b, ['贈品', gf.size].concat(normOpts_(d, g.shop, cup2_(l), gf.cat)));
+      return;
+    }
+    const it = itemOf(l);
     it.qty += l.qty * (l.bogo ? 2 : 1);                 // 買一送一的一組是 2 杯
     if (l.bogo) it.sets += l.qty;
     // 買一送一拆成兩杯各自統計（兩杯甜度冰塊可能不同），店家照杯數做
@@ -769,6 +786,7 @@ function cleanLines_(lines) {
       cat: String(l.cat || '').slice(0, 20),
       bogo: !!l.bogo,
       size: String(l.size || '').trim().slice(0, 6),
+      ...(l.bogo && l.gift && l.gift.item ? { gift: { item: String(l.gift.item).slice(0, 40), cat: String(l.gift.cat || '').slice(0, 20), size: String(l.gift.size || '').trim().slice(0, 6) } } : {}),
       opts: (Array.isArray(l.opts) ? l.opts : []).map(String).slice(0, 12),
       opts2: l.bogo && Array.isArray(l.opts2) ? l.opts2.map(String).slice(0, 12) : [],
       unit: Math.max(0, Math.round(+l.unit || 0)),
@@ -784,9 +802,13 @@ function cleanLines_(lines) {
   });
 }
 function sumAmt_(lines) { return lines.reduce((s, l) => s + l.unit * l.qty, 0); }
-// 買一送一第 2 杯的選項；沒有另外選就跟第 1 杯一樣
-function cup2_(l) { return l.opts2 && l.opts2.length ? l.opts2 : (l.opts || []); }
+// 買 A 送 B 的 B（{ item, cat, size }）；一般買一送一是 null
+function gift_(l) { return l.bogo && l.gift && l.gift.item ? l.gift : null; }
+// 買一送一第 2 杯的選項；沒有另外選就跟第 1 杯一樣（買 A 送 B 的第 2 杯是另一個品項，只看 opts2）
+function cup2_(l) { return gift_(l) ? (l.opts2 || []) : l.opts2 && l.opts2.length ? l.opts2 : (l.opts || []); }
 function variant_(l) {
+  const gf = gift_(l);
+  if (gf) return [l.size].concat(l.opts || []).filter(String).join(' ') + '／送 ' + [gf.item, gf.size].concat(cup2_(l)).filter(String).join(' ');
   const v = [l.bogo ? '買一送一' : '', l.size].concat(l.opts || []).filter(String).join(' ');
   const c2 = cup2_(l).join(' ');
   return l.bogo && c2 !== (l.opts || []).join(' ') ? v + '／第2杯 ' + c2 : v;

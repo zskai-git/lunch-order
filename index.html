@@ -515,11 +515,17 @@ const WEEK = '日一二三四五六';
 // 店家每週固定公休日：0 = 週日 … 6 = 週六
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const cleanClosed = list => WEEK_ORDER.filter(d => (Array.isArray(list) ? list : []).map(Number).includes(d));
-const closedToday = s => cleanClosed(s.closed).includes(new Date().getDay());
+// off = 0 今天、1 明天、2 後天
+const dayAfter = off => { const d = new Date(now()); d.setDate(d.getDate() + off); return d; };
+const DAY_WORD = ['今天', '明天', '後天'];
+const closedOn = (s, off) => cleanClosed(s.closed).includes(dayAfter(off || 0).getDay());
+const closedToday = s => closedOn(s, 0);
 const closedText = s => { const c = cleanClosed(s.closed); return c.length ? c.map(d => '週' + WEEK[d]).join('、') + '公休' : ''; };
 const fmtTime = ms => { const d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
 const fmtDate = ms => { const d = new Date(ms); return (d.getMonth() + 1) + '/' + d.getDate() + '（' + WEEK[d.getDay()] + '）'; };
 const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+// 不是今天截止的團，時間前面加「明天」或日期
+const dayPrefix = ms => sameDay(ms, now()) ? '' : sameDay(ms, dayAfter(1)) ? '明天 ' : fmtDate(ms) + ' ';
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } },
@@ -571,10 +577,15 @@ const ART = {
 
 /* ================= 訂單計算（前端、試用後端共用） ================= */
 const BOGO = '買一送一';
-// 買一送一的兩杯可以選不同甜度冰塊：opts 是第 1 杯，opts2 是第 2 杯（空的 = 跟第 1 杯一樣）
-const cup2Of = l => (l.opts2 && l.opts2.length ? l.opts2 : l.opts || []);
-const cupsDiffer = l => !!l.bogo && cup2Of(l).join('、') !== (l.opts || []).join('、');
-const tagsOf = l => [l.bogo ? BOGO : '', l.size, ...(l.opts || []), ...(cupsDiffer(l) ? ['第2杯：' + cup2Of(l).join(' ')] : [])].filter(Boolean);
+// 買 A 送 B：promo.gift / line.gift = { item, cat, size }，第 2 杯是 B，付 A 的原價
+const giftOf = l => (l.bogo && l.gift && l.gift.item ? l.gift : null);
+const giftName = x => x.gift.item + (x.gift.size ? ' ' + x.gift.size : '');
+const promoName = p => (p.gift && p.gift.item ? '買' + p.item + '送' + p.gift.item : BOGO);
+// 買一送一的兩杯可以選不同甜度冰塊：opts 是第 1 杯，opts2 是第 2 杯（空的 = 跟第 1 杯一樣）；買 A 送 B 的第 2 杯是另一個品項，只看 opts2
+const cup2Of = l => (giftOf(l) ? l.opts2 || [] : l.opts2 && l.opts2.length ? l.opts2 : l.opts || []);
+const cupsDiffer = l => !!l.bogo && !giftOf(l) && cup2Of(l).join('、') !== (l.opts || []).join('、');
+const tagsOf = l => [l.bogo && !giftOf(l) ? BOGO : '', l.size, ...(l.opts || []),
+  ...(giftOf(l) ? ['送：' + [giftName(l), ...cup2Of(l)].join(' ')] : cupsDiffer(l) ? ['第2杯：' + cup2Of(l).join(' ')] : [])].filter(Boolean);
 const variantText = l => tagsOf(l).join(' ');
 const lineKey = l => (l.custom ? '客製:' + l.custom.text + '|' : '') + (l.cat || '') + '|' + l.item + '|' + variantText(l) + '|' + (l.note || '');
 // 客製點餐：custom.text 是想點的（菜單上沒有），item/size/opts 是店家做不到時改點的「備案」
@@ -585,6 +596,7 @@ const sumAmt = lines => lines.reduce((s, l) => s + l.unit * l.qty, 0);
 const cupsOf = l => l.qty * (l.bogo ? 2 : 1);          // 買一送一的一組是 2 杯
 const sumQty = lines => lines.reduce((s, l) => s + cupsOf(l), 0);
 const qtyText = l => '×' + l.qty + (l.bogo ? ' 組' : '');
+const itemCups = l => (giftOf(l) ? l.qty : cupsOf(l));   // 算「這個品項」的杯數：買 A 送 B 的 B 不算 A 的
 // 分類優惠：「-5」= 每份減 5 元，「x90」= 打 9 折（四捨五入）
 function parseDisc(s) {
   s = String(s || '').trim();
@@ -602,7 +614,16 @@ function cleanPromos(list, items) {
   return (Array.isArray(list) ? list : []).filter(p => {
     if (!p || !items.some(m => sameItem(m, p))) return false;
     const k = (p.cat || '') + '|' + p.item; if (seen.has(k)) return false; seen.add(k); return true;
-  }).slice(0, 20).map(p => ({ item: String(p.item), cat: String(p.cat || '').slice(0, 20), only: !!p.only, size: String(p.size || '').trim().slice(0, 6) }));
+  }).slice(0, 20).map(p => Object.assign({ item: String(p.item), cat: String(p.cat || '').slice(0, 20), only: !!p.only, size: String(p.size || '').trim().slice(0, 6) },
+    p.gift && p.gift.item && items.some(m => sameItem(m, p.gift)) ? { gift: { item: String(p.gift.item), cat: String(p.gift.cat || '').slice(0, 20), size: String(p.gift.size || '').trim().slice(0, 6) } } : {}));
+}
+// 開團時的優惠文字；只有買一送一時維持原本的寫法
+function promoSummary(shop, promos) {
+  const mixed = promos.some(p => p.gift), sz = x => (x.size ? ' ' + x.size : '');
+  return {
+    badge: mixed ? '優惠' : BOGO,
+    text: promos.map(p => p.gift ? '買 ' + labelOf(shop, p) + sz(p) + ' 送 ' + labelOf(shop, p.gift) + sz(p.gift) : labelOf(shop, p) + sz(p) + (mixed ? ' ' + BOGO : '')).join('、'),
+  };
 }
 function cleanLines(lines) {
   return (Array.isArray(lines) ? lines : []).filter(l => l && l.item && +l.qty > 0).slice(0, 30).map(l => ({
@@ -615,6 +636,7 @@ function cleanLines(lines) {
     unit: Math.max(0, Math.round(+l.unit || 0)),
     qty: Math.min(50, Math.max(1, Math.round(+l.qty))),
     note: String(l.note || '').slice(0, 60),
+    ...(l.bogo && l.gift && l.gift.item ? { gift: { item: String(l.gift.item).slice(0, 40), cat: String(l.gift.cat || '').slice(0, 20), size: String(l.gift.size || '').trim().slice(0, 6) } } : {}),
     ...(l.custom && String(l.custom.text || '').trim() ? {
       custom: { text: String(l.custom.text).trim().slice(0, 60), price: Math.max(0, Math.round(+l.custom.price || 0)) },
       fbUnit: Math.max(0, Math.round(+l.fbUnit || 0)),
@@ -1054,6 +1076,7 @@ function avatar(name, cls = '') {
 function cdText(ms) {
   const d = ms - now(); if (d <= 0) return '已截止';
   const m = Math.floor(d / 60e3), s = Math.floor(d / 1000) % 60;
+  if (m >= 1440) return '剩 ' + Math.floor(m / 1440) + ' 天 ' + Math.floor(m % 1440 / 60) + ' 小時';
   if (m >= 60) return '剩 ' + Math.floor(m / 60) + ' 小時 ' + (m % 60) + ' 分';
   return '剩 ' + pad(m) + ':' + pad(s);
 }
@@ -1175,7 +1198,7 @@ function renderTop() {
     top.innerHTML = `
       <div class="hrow">
         <button class="iconbtn" data-act="back" aria-label="返回">${I.back}</button>
-        <div class="gh"><div class="gh-t">${esc(g.shop)}</div><div class="gh-s"><span class="num">${fmtTime(g.deadline)} 截止</span>${cdHtml(g)}</div></div>
+        <div class="gh"><div class="gh-t">${esc(g.shop)}</div><div class="gh-s"><span class="num">${dayPrefix(g.deadline)}${fmtTime(g.deadline)} 截止</span>${cdHtml(g)}</div></div>
         <span class="spacer"></span>
         ${isOpen(g) ? `<button class="iconbtn" data-act="share-invite" aria-label="分享這一團到 LINE">${I.share}</button>` : ''}
         ${shop.phone ? `<a class="iconbtn" href="tel:${esc(shop.phone.replace(/[^\d+]/g, ''))}" aria-label="打給店家 ${esc(shop.phone)}">${I.phone}</a>` : ''}
@@ -1243,13 +1266,13 @@ function gcard(g, past) {
   const drink = shop.type === '飲料';
   const avs = os.slice(-5).map(o => avatar(o.name, 'sm')).join('');
   const mineTxt = mine.length ? '你點了 ' + mine.map(l => lineTitle(g.shop, l) + (l.qty > 1 || l.bogo ? ' ' + qtyText(l) : '')).join('、') : (past ? '你沒有點' : '你還沒點');
-  const promoTxt = (g.promos || []).length && !past ? ' · ' + BOGO + '：' + g.promos.map(p => labelOf(g.shop, p)).join('、') : '';
+  const ps = (g.promos || []).length && !past ? promoSummary(g.shop, g.promos) : null, promoTxt = ps ? ' · ' + ps.badge + '：' + ps.text : '';
   return `<button class="gcard ${past ? 'past' : ''}" data-act="open-group" data-id="${esc(g.id)}">
     <div class="gc-main">
       <span class="glyph ${drink ? 'drink' : 'bento'}">${drink ? ART.tea : ART.bento}</span>
       <span class="gc-body">
         <span class="gc-t"><b>${esc(g.shop)}</b>${cdHtml(g)}</span>
-        <span class="gc-m num">${fmtDate(g.deadline)} ${fmtTime(g.deadline)} 截止${g.note ? ' · ' + esc(g.note) : ''}${esc(promoTxt)}</span>
+        <span class="gc-m num">${sameDay(g.deadline, dayAfter(1)) ? '明天 ' : ''}${fmtDate(g.deadline)} ${fmtTime(g.deadline)} 截止${g.note ? ' · ' + esc(g.note) : ''}${esc(promoTxt)}</span>
         <span class="gc-p">${os.length ? `<span class="avs">${avs}</span>` : ''}<span class="num">${os.length} 人 · ${qty} 份 · ${money(total)}${past && due ? ' · 未收 ' + money(due) : ''}</span></span>
       </span>
     </div>
@@ -1261,19 +1284,19 @@ function menuHtml(g) {
   const shop = shopOf(g), items = menuOf(g.shop), open = isOpen(g), drink = shop.type === '飲料';
   const mine = myLines(g.id), otherLines = [];
   ordersOf(g.id).forEach(o => { if (o.name !== S.me) otherLines.push(...o.lines); });
-  const othersOf = m => otherLines.filter(l => sameMenuLine(l, m)).reduce((s, l) => s + cupsOf(l), 0);
+  const othersOf = m => otherLines.filter(l => sameMenuLine(l, m)).reduce((s, l) => s + itemCups(l), 0);
   const cats = [...new Set(items.map(m => m.cat || '其他'))];
   let h = '';
   if (!open) h += `<div class="notice closed">這一團已截止，訂單不能再修改。</div>`;
   const note = [g.note, shop.note].filter(Boolean).join(' · ');
-  if ((g.promos || []).length && open) h += `<div class="notice promo"><span class="bogo">${BOGO}</span><span>今天 ${esc(g.promos.map(p => labelOf(g.shop, p) + (p.size ? ' ' + p.size : '')).join('、'))}</span></div>`;
+  if ((g.promos || []).length && open) { const ps = promoSummary(g.shop, g.promos); h += `<div class="notice promo"><span class="bogo">${ps.badge}</span><span>${sameDay(g.deadline, now()) ? '今天 ' : ''}${esc(ps.text)}</span></div>`; }
   if (note && open) h += `<div class="notice"><span>${esc(note)}</span></div>`;
   if (!items.length) h += `<div class="empty-st" style="margin-top:16px"><b>這家店還沒有菜單</b><p>到「管理 → 店家」新增品項。</p></div>`;
   cats.forEach((c, ci) => {
     const catItems = items.filter(m => (m.cat || '其他') === c), cd = parseDisc(catItems[0] && catItems[0].disc);
     h += `<section class="sec" id="cat-${ci}"><h3>${esc(c)}${cd ? `<span class="dtag">${discText(cd)}</span>` : ''}</h3><div class="menu">`;
     catItems.forEach(m => {
-      const myQty = mine.filter(l => sameMenuLine(l, m)).reduce((s, l) => s + cupsOf(l), 0), others = othersOf(m);
+      const myQty = mine.filter(l => sameMenuLine(l, m)).reduce((s, l) => s + itemCups(l), 0), others = othersOf(m);
       const pr = promoOf(g, m), d = parseDisc(m.disc);
       // 便當沒有份量、沒有優惠活動時才能直接 +1；其他都要打開面板選
       const quick = !drink && !pr && !m.priceL;
@@ -1283,7 +1306,7 @@ function menuHtml(g) {
       let price = regular;
       if (pr) {   // 買一送一：只顯示限定容量的「2 杯」原價；不是只能買一送一的話，平常價格也列出來
         const bs = m.priceL ? (sz.includes(pr.size) ? [pr.size] : sz) : [''];
-        price = `<span class="bogo">${BOGO}</span>` + bs.map(s => `<span class="price">${esc(s)} 2 杯 ${money(m.priceL && s === sz[1] ? m.priceL : m.price)}</span>`).join('') + (pr.only ? '' : regular);
+        price = `<span class="bogo">${esc(pr.gift ? '送' + giftName(pr) : BOGO)}</span>` + bs.map(s => `<span class="price">${esc(s)}${pr.gift ? '' : ' 2 杯'} ${money(m.priceL && s === sz[1] ? m.priceL : m.price)}</span>`).join('') + (pr.only ? '' : regular);
       }
       let ctl;
       if (!open) ctl = myQty ? `<span class="cnt">×${myQty}</span>` : '';
@@ -1312,8 +1335,8 @@ function menuHtml(g) {
 
 // 顯示用：沒動過的單選選項補上預設值，跟統計一致（不影響訂單本身）
 function shownTags(shop, l) {
-  const o1 = [...new Set(normOpts(shop, l.opts, l.cat))], o2 = [...new Set(normOpts(shop, cup2Of(l), l.cat))];
-  return [l.bogo ? BOGO : '', l.size, ...o1, ...(cupsDiffer(l) ? ['第2杯：' + o2.join(' ')] : [])].filter(Boolean);
+  const gf = giftOf(l), o1 = [...new Set(normOpts(shop, l.opts, l.cat))], o2 = [...new Set(normOpts(shop, cup2Of(l), gf ? gf.cat : l.cat))];
+  return [l.bogo && !gf ? BOGO : '', l.size, ...o1, ...(gf ? ['送：' + [giftName(l), ...o2].join(' ')] : cupsDiffer(l) ? ['第2杯：' + o2.join(' ')] : [])].filter(Boolean);
 }
 function peopleHtml(g) {
   const open = isOpen(g);
@@ -1345,9 +1368,27 @@ function summarize(g) {
   os.forEach(o => o.lines.forEach(l => {
     // 客製點餐另外列，不混進品項合計（要先問店家能不能做）
     if (l.custom) { customs.push({ name: o.name, text: l.custom.text, qty: l.qty, fallback: fallbackText(g.shop, l), note: l.note }); return; }
-    const name = labelOf(g.shop, l);      // 同名不同分類的品項會帶分類，例如「鍋燒類 拉麵」
-    let it = items.get(name);
-    if (!it) { it = { item: name, qty: 0, sets: 0, vars: new Map() }; items.set(name, it); }
+    const itemOf = x => {
+      const name = labelOf(g.shop, x);      // 同名不同分類的品項會帶分類，例如「鍋燒類 拉麵」
+      let it = items.get(name);
+      if (!it) { it = { item: name, qty: 0, sets: 0, vars: new Map() }; items.set(name, it); }
+      return it;
+    };
+    const note = String(l.note || '').trim();
+    const addVar = (it, parts) => {
+      const vk = parts.concat(note ? [note] : []).join('・');
+      let v = it.vars.get(vk);
+      if (!v) { v = { label: vk, parts, note, qty: 0, bogo: false }; it.vars.set(vk, v); }
+      v.qty += l.qty;
+    };
+    const gf = giftOf(l);
+    if (gf) {   // 買 A 送 B：A 照一般的算，B 算在 B 自己的品項下面、標「贈品」
+      const a = itemOf(l), b = itemOf(gf);
+      a.qty += l.qty; addVar(a, [l.size, ...normOpts(g.shop, l.opts, l.cat)].filter(Boolean));
+      b.qty += l.qty; addVar(b, ['贈品', gf.size, ...normOpts(g.shop, cup2Of(l), gf.cat)].filter(Boolean));
+      return;
+    }
+    const it = itemOf(l);
     it.qty += cupsOf(l);
     // 買一送一拆成兩杯各自統計（兩杯口味可能不同），店家照杯數做
     const cups = l.bogo ? [l.opts || [], cup2Of(l)] : [l.opts || []];
@@ -1416,7 +1457,7 @@ function statsHtml(g) {
 
 /* ================= 今日總覽：今天所有團合在一起，一個人收一次錢、每家店各付多少 ================= */
 function overview() {
-  const groups = S.data.groups.filter(g => sameDay(g.deadline, now()) || isOpen(g)).sort((a, b) => a.deadline - b.deadline);
+  const groups = S.data.groups.filter(g => sameDay(g.deadline, now())).sort((a, b) => a.deadline - b.deadline);   // 預開的明天團不算進今天
   const typeCount = {};
   groups.forEach(g => { const t = shopOf(g).type; typeCount[t] = (typeCount[t] || 0) + 1; });
   // 欄位名稱：同類型只有一團就寫「便當」「飲料」，有兩團以上就寫店名
@@ -1570,39 +1611,45 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
   const drink = shop.type === '飲料', groups = optionsFor(shop).filter(gr => appliesTo(gr, m.cat));
   const base = editIdx != null ? myLines(gid)[editIdx] : null;
   const custom = customIn || (base && base.custom) || null;
-  const sz = sizesOf(m), disc = parseDisc(m.disc), pr = custom ? null : promoOf(g, m), label = labelOf(g.shop, m);
+  const sz = sizesOf(m), disc = parseDisc(m.disc), label = labelOf(g.shop, m);
+  let pr = custom ? null : promoOf(g, m);
+  // 買 A 送 B：gm 是 B；B 已經不在菜單上就不提供這個優惠
+  const gm = pr && pr.gift ? findMenu(g.shop, pr.gift) : null; if (pr && pr.gift && !gm) pr = null;
+  const gift = !!gm, groups2 = gift ? optionsFor(shop).filter(gr => appliesTo(gr, gm.cat)) : groups, grsOf = c => (c === 2 ? groups2 : groups);
+  const gsize = gift && gm.priceL && sizesOf(gm).includes(pr.gift.size) ? pr.gift.size : '';
+  const giftLabel = gift ? labelOf(g.shop, gm) + (gsize ? ' ' + gsize : '') : '';
   const prSize = pr && m.priceL && sz.includes(pr.size) ? pr.size : '';     // 買一送一限定的容量（例如只有 L）
   const st = { size: m.priceL ? (base && sz.includes(base.size) ? base.size : sz[0]) : '', qty: base ? base.qty : 1, sel: { 1: {}, 2: {} } };
   // 買一送一：一組 2 杯、付原價，兩杯甜度冰塊可以不同；「只能點買一送一」時不能單杯
   st.bogo = !!pr && (pr.only || (base ? !!base.bogo : true));
-  st.same = !base || !cupsDiffer(base);
+  st.same = !gift && (!base || !cupsDiffer(base));
   if (st.bogo && prSize) st.size = prSize;
   // 新點的：單選組有預設值就先幫忙選好（例如麵體預設意麵）
-  [1, 2].forEach(c => groups.forEach(gr => { st.sel[c][gr.name] = new Set(!base && !gr.multi && gr.def ? [gr.def] : []); }));
-  const load = (c, list) => list.forEach(o => { const gr = groups.find(x => x.items.some(i => i.label === o)); if (gr) st.sel[c][gr.name].add(o); });
+  [1, 2].forEach(c => grsOf(c).forEach(gr => { st.sel[c][gr.name] = new Set(!base && !gr.multi && gr.def ? [gr.def] : []); }));
+  const load = (c, list) => list.forEach(o => { const gr = grsOf(c).find(x => x.items.some(i => i.label === o)); if (gr) st.sel[c][gr.name].add(o); });
   if (base) { load(1, base.opts); load(2, cup2Of(base)); }
   const raw = s => (m.priceL && s === sz[1] ? m.priceL : m.price);
   const cupPrice = s => st.bogo ? raw(s) : applyDisc(raw(s), disc);
-  const addOf = c => groups.reduce((s, gr) => s + gr.items.reduce((t, i) => t + (st.sel[c][gr.name].has(i.label) ? i.add : 0), 0), 0);
-  const twoCups = () => st.bogo && !st.same;
+  const addOf = c => grsOf(c).reduce((s, gr) => s + gr.items.reduce((t, i) => t + (st.sel[c][gr.name].has(i.label) ? i.add : 0), 0), 0);
+  const twoCups = () => st.bogo && (gift || !st.same);
   const unit = () => cupPrice(st.size) + addOf(1) + (st.bogo ? addOf(twoCups() ? 2 : 1) : 0);
   const charge = () => custom && custom.price ? custom.price : unit();   // 客製有填價格就收客製的價，沒填先用備案的價
-  const opts = c => groups.flatMap(gr => gr.items.filter(i => st.sel[c][gr.name].has(i.label)).map(i => i.label));
+  const opts = c => grsOf(c).flatMap(gr => gr.items.filter(i => st.sel[c][gr.name].has(i.label)).map(i => i.label));
   const p1 = applyDisc(m.price, disc), p2 = applyDisc(m.priceL, disc);
-  const optsHtml = () => groups.map(gr => `<div class="ogrp" data-g="${esc(gr.name)}"><div class="ogrp-h"><span>${esc(gr.name)}</span><span class="req ${gr.required ? 'must' : ''}">${gr.required ? '必選' : gr.multi ? '可複選' : '選填'}</span></div>
+  const optsHtml = gs => gs.map(gr => `<div class="ogrp" data-g="${esc(gr.name)}"><div class="ogrp-h"><span>${esc(gr.name)}</span><span class="req ${gr.required ? 'must' : ''}">${gr.required ? '必選' : gr.multi ? '可複選' : '選填'}</span></div>
       <div class="chips">${gr.items.map(i => `<button class="chip" data-opt="${esc(i.label)}">${esc(i.label)}${i.add ? ` <small>+${i.add}</small>` : ''}</button>`).join('')}</div></div>`).join('');
   const html = `
     ${custom ? `<div class="notice promo" style="margin:0 0 12px"><span class="ctag">${CUSTOM}</span><span>${esc(custom.text)}${custom.price ? '　' + money(custom.price) : ''}</span></div>` : ''}
     <h2 class="sh-h">${custom ? '備案：' : ''}${esc(label)}</h2>
     <div class="sh-sub">${m.desc ? esc(m.desc) + ' · ' : ''}${m.priceL ? `${esc(sz[0])} ${money(p1)} / ${esc(sz[1])} ${money(p2)}` : money(p1)}${disc ? ' · 已' + discText(disc) : ''}</div>
-    ${pr ? `<div class="ogrp" data-g="__plan"><div class="ogrp-h"><span>今日${BOGO}${prSize ? '（限 ' + esc(prSize) + '）' : ''}</span><span class="req must">${pr.only ? '只能點' + BOGO : '必選'}</span></div><div class="chips">
-      <button class="chip" data-plan="1">${BOGO}（2 杯）</button>${pr.only ? '' : `<button class="chip" data-plan="0">單杯</button>`}</div>
-      <div class="hint">一組 2 杯${prSize ? '、限 ' + esc(prSize) : '同容量'}，付原價；兩杯的甜度、冰塊可以分開選。</div></div>` : ''}
+    ${pr ? `<div class="ogrp" data-g="__plan"><div class="ogrp-h"><span>${gift ? '優惠' : '今日' + BOGO}${prSize ? '（限 ' + esc(prSize) + '）' : ''}</span><span class="req must">${pr.only ? '只能點' + esc(promoName(pr)) : '必選'}</span></div><div class="chips">
+      <button class="chip" data-plan="1">${gift ? '送 ' + esc(giftLabel) : BOGO}（2 杯）</button>${pr.only ? '' : `<button class="chip" data-plan="0">單杯</button>`}</div>
+      <div class="hint">${gift ? `付 ${esc(label)}${prSize ? ' ' + esc(prSize) : ''} 的原價，送一杯 ${esc(giftLabel)}；兩杯的甜度、冰塊分開選。` : `一組 2 杯${prSize ? '、限 ' + esc(prSize) : '同容量'}，付原價；兩杯的甜度、冰塊可以分開選。`}</div></div>` : ''}
     ${m.priceL ? `<div class="ogrp" data-g="__size"><div class="ogrp-h"><span>容量</span><span class="req must">必選</span></div><div class="chips">
       ${sz.map(s => `<button class="chip" data-size="${esc(s)}">${esc(s)} <small data-szp="${esc(s)}"></small></button>`).join('')}</div></div>` : ''}
-    ${pr ? `<div class="switch-row" id="it-samerow"><span><b>第 2 杯跟第 1 杯一樣</b><small>關掉就能幫第 2 杯選不同的甜度、冰塊、加料</small></span><button class="tog" id="it-same" aria-label="第 2 杯跟第 1 杯一樣"></button></div>` : ''}
-    <div class="cup" data-cup="1"><div class="cup-h" hidden>第 1 杯</div>${optsHtml()}</div>
-    ${pr ? `<div class="cup" data-cup="2" hidden><div class="cup-h">第 2 杯</div>${optsHtml()}</div>` : ''}
+    ${pr && !gift ? `<div class="switch-row" id="it-samerow"><span><b>第 2 杯跟第 1 杯一樣</b><small>關掉就能幫第 2 杯選不同的甜度、冰塊、加料</small></span><button class="tog" id="it-same" aria-label="第 2 杯跟第 1 杯一樣"></button></div>` : ''}
+    <div class="cup" data-cup="1"><div class="cup-h" hidden>第 1 杯${gift ? '：' + esc(label) : ''}</div>${optsHtml(groups)}</div>
+    ${pr ? `<div class="cup" data-cup="2" hidden><div class="cup-h">第 2 杯${gift ? '（送）：' + esc(giftLabel) : ''}</div>${optsHtml(groups2)}</div>` : ''}
     <div class="ogrp"><div class="ogrp-h"><label for="it-note">備註</label><span class="req">選填</span></div>
       <input class="field" id="it-note" maxlength="60" placeholder="${drink ? '例如：分開裝、吸管另外給' : '例如：雞腿去皮、醬汁另外裝'}" value="${esc(base ? base.note : '')}"></div>
     ${drink ? `<div class="tlabel" aria-hidden="true"><div class="tl-top"><span>${esc(g.shop)}</span><span>${esc(S.me)}</span></div><div class="tl-item" id="tl-item"></div><div class="tl-opts" id="tl-opts"></div><div class="tl-bot"><span class="bars"></span><b class="num" id="tl-price"></b></div></div>` : ''}
@@ -1627,11 +1674,11 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
         $('#it-q', root).textContent = st.bogo ? st.qty + ' 組' : st.qty;
         $('#it-add', root).textContent = (base ? '更新 · ' : '加入 · ') + (st.bogo ? st.qty * 2 + ' 杯 ' : '') + money(charge() * st.qty);
         if (drink) {
-          $('#tl-item', root).textContent = label + (st.size ? ' ' + st.size : '') + (st.bogo ? ' ×2' : '');
+          $('#tl-item', root).textContent = label + (st.size ? ' ' + st.size : '') + (st.bogo ? (gift ? ' ＋ ' + giftLabel : ' ×2') : '');
           const o1 = opts(1), o2 = opts(2), el = $('#tl-opts', root);
           el.textContent = !o1.length ? '還沒選甜度、冰塊' : twoCups() ? '①' + o1.join(' / ') + '　②' + (o2.join(' / ') || '還沒選') : o1.join(' / ');
           el.classList.toggle('ph', !o1.length);
-          $('#tl-price', root).textContent = (st.bogo ? BOGO + ' ' : '') + money(charge()) + (st.qty > 1 ? ' ×' + st.qty : '');
+          $('#tl-price', root).textContent = (st.bogo ? promoName(pr) + ' ' : '') + money(charge()) + (st.qty > 1 ? ' ×' + st.qty : '');
         }
       };
       paint();
@@ -1648,7 +1695,7 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
         const op = e.target.closest('[data-opt]');
         if (op) {
           const c = +op.closest('.cup').dataset.cup;
-          const gr = groups.find(x => x.name === op.closest('.ogrp').dataset.g), set = st.sel[c][gr.name], v = op.dataset.opt;
+          const gr = grsOf(c).find(x => x.name === op.closest('.ogrp').dataset.g), set = st.sel[c][gr.name], v = op.dataset.opt;
           if (gr.multi) { set.has(v) ? set.delete(v) : set.add(v); }
           else if (set.has(v) && !gr.required) set.clear();
           else { set.clear(); set.add(v); }
@@ -1658,7 +1705,7 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
         if (q) { st.qty = Math.min(20, Math.max(1, st.qty + +q.dataset.q)); return paint(); }
         if (e.target.closest('#it-add')) {
           for (const c of twoCups() ? [1, 2] : [1]) {
-            const miss = groups.filter(gr => gr.required && !st.sel[c][gr.name].size);
+            const miss = grsOf(c).filter(gr => gr.required && !st.sel[c][gr.name].size);
             if (miss.length) {
               miss.forEach(gr => { const el = $(`.cup[data-cup="${c}"] .ogrp[data-g="${CSS.escape(gr.name)}"]`, root); el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); });
               $(`.cup[data-cup="${c}"] .ogrp[data-g="${CSS.escape(miss[0].name)}"]`, root).scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1666,6 +1713,7 @@ function openItem(gid, itemName, editIdx, cat, customIn) {
             }
           }
           const line = { item: m.item, cat: m.cat, bogo: st.bogo, size: m.priceL ? st.size : '', opts: opts(1), opts2: twoCups() ? opts(2) : [], unit: charge(), qty: st.qty, note: $('#it-note', root).value.trim() };
+          if (st.bogo && gift) line.gift = { item: gm.item, cat: gm.cat, size: gsize };
           if (custom) Object.assign(line, { custom: { text: custom.text, price: custom.price || 0 }, fbUnit: unit() });
           const lines = myLines(gid);
           if (base) lines.splice(editIdx, 1);
@@ -1885,7 +1933,7 @@ function spinShops(withDrink, last) {
 }
 function newOpenSec() {
   const d = new Date(now() + 60 * 60e3); d.setMinutes(d.getMinutes() < 30 ? 30 : 60, 0, 0);
-  return { shop: '', q: '', h: d.getHours(), m: d.getMinutes(), note: '', promos: [] };
+  return { shop: '', q: '', day: 0, h: d.getHours(), m: d.getMinutes(), note: '', promos: [] };
 }
 function openForm() {
   if (!S.openForm) S.openForm = { 便當: newOpenSec(), 飲料: newOpenSec() };
@@ -1905,12 +1953,12 @@ function suggestHtml(type) {
   const lastUsed = name => Math.max(0, ...S.data.groups.filter(g => g.shop === name).map(g => g.deadline));
   const list = S.data.shops.filter(s => s.type === type && !s.disabled)
     .map(s => ({ s, score: fuzzy(s.name, F.q), used: lastUsed(s.name) }))
-    .filter(x => x.score > 0).sort((a, b) => closedToday(a.s) - closedToday(b.s) || b.score - a.score || b.used - a.used || a.s.name.localeCompare(b.s.name, 'zh-Hant'));
+    .filter(x => x.score > 0).sort((a, b) => closedOn(a.s, F.day) - closedOn(b.s, F.day) || b.score - a.score || b.used - a.used || a.s.name.localeCompare(b.s.name, 'zh-Hant'));
   if (!list.length) return `<div class="sugg-empty">${F.q ? '找不到「' + esc(F.q) + '」' : '還沒有' + type + '店，先到「店家」新增'}</div>`;
   // 沒打字：只列最近常開的 4 家，其餘收在「看更多」；有打字：列出所有符合的
   const k = 'sugg-' + type, shown = F.q || S.expand[k] ? list : list.slice(0, 4);
   return shown.map(x => `<button class="sugg" data-act="o-pick" data-type="${type}" data-shop="${esc(x.s.name)}">
-    <span class="glyph xs ${type === '飲料' ? 'drink' : 'bento'}">${type === '飲料' ? ART.tea : ART.bento}</span><span>${esc(x.s.name)}</span>${closedToday(x.s) ? '<span class="closed-tag">今天公休</span>' : ''}${x.s.phone ? `<small>${esc(x.s.phone)}</small>` : ''}</button>`).join('')
+    <span class="glyph xs ${type === '飲料' ? 'drink' : 'bento'}">${type === '飲料' ? ART.tea : ART.bento}</span><span>${esc(x.s.name)}</span>${closedOn(x.s, F.day) ? `<span class="closed-tag">${DAY_WORD[F.day || 0]}公休</span>` : ''}${x.s.phone ? `<small>${esc(x.s.phone)}</small>` : ''}</button>`).join('')
     + (F.q ? '' : moreBtn(k, list.length));
 }
 // 「看更多／收起」：超過 4 項才出現，預設收起
@@ -1928,25 +1976,35 @@ function openSecHtml(type) {
   const cats = [...new Set(items.map(m => m.cat || '其他'))];
   return h + `<div class="picked"><b>${esc(F.shop)}</b><button class="sbtn" data-act="o-clear" data-type="${type}">換一家</button></div>
     <label class="lbl">截止時間</label>
+    <div class="chips sm">${DAY_WORD.map((w, d) => `<button class="chip ${(F.day || 0) === d ? 'on' : ''}" data-act="o-day" data-type="${type}" data-v="${d}">${w} <small>${fmtDate(dayAfter(d))}</small></button>`).join('')}</div>
+    ${F.day ? `<div class="hint">預開${DAY_WORD[F.day]}的團：開好之後大家馬上就能點，${DAY_WORD[F.day]}截止。</div>` : ''}
     <div class="tpick">
       <select class="field num" data-f="oh" data-type="${type}" aria-label="時">${Array.from({ length: 24 }, (_, i) => `<option value="${i}" ${i === F.h ? 'selected' : ''}>${pad(i)} 點</option>`).join('')}</select>
       <span>:</span>
       <select class="field num" data-f="om" data-type="${type}" aria-label="分">${Array.from({ length: 12 }, (_, i) => i * 5).map(m => `<option value="${m}" ${m === F.m ? 'selected' : ''}>${pad(m)} 分</option>`).join('')}</select>
     </div>
     <label class="lbl">給大家的話</label><input class="field" data-f="onote" data-type="${type}" maxlength="80" value="${esc(F.note)}" placeholder="選填，例如：今天老闆加送滷蛋">
-    <label class="lbl">今日${BOGO} <span class="muted" style="font-weight:400">選填</span></label>
-    ${left.length ? `<div class="tpick psel"><select class="field" data-f="opitem" data-type="${type}" aria-label="買一送一品項"><option value="">選品項…</option>${cats.map(c => {
+    <label class="lbl">優惠 <span class="muted" style="font-weight:400">選填</span></label>
+    ${left.length ? `<div class="tpick psel"><select class="field" data-f="opitem" data-type="${type}" aria-label="優惠品項"><option value="">選品項…</option>${cats.map(c => {
       const os = left.filter(m => (m.cat || '其他') === c);
       return os.length ? `<optgroup label="${esc(c)}">${os.map(m => `<option value="${items.indexOf(m)}">${esc(m.item)}</option>`).join('')}</optgroup>` : '';
     }).join('')}</select><button class="btn auto ghost" data-act="promo-add" data-type="${type}">加入</button></div>` : ''}
     ${F.promos.map((p, i) => {
       const pm = items.find(x => sameItem(x, p)), psz = pm && pm.priceL ? sizesOf(pm) : [];
-      return `<div class="prm"><div class="arow"><div class="t"><b>${esc(labelOf(F.shop, p))}</b><small>${p.size ? '限 ' + esc(p.size) + '，' : ''}${p.only ? '只能點' + BOGO + '，不能單杯' : '也可以點單杯'}</small></div>
-      <span class="muted" style="font-size:12.5px">只能${BOGO}</span><button class="tog ${p.only ? 'on' : ''}" data-act="promo-only" data-type="${type}" data-i="${i}" aria-label="只能點${BOGO}"></button>
+      const gmn = p.gift && p.gift.item ? items.find(x => sameItem(x, p.gift)) : null, gsz = gmn && gmn.priceL ? sizesOf(gmn) : [];
+      const kind = p.gift ? '買 A 送 B' : BOGO;
+      return `<div class="prm"><div class="arow"><div class="t"><b>${esc(labelOf(F.shop, p))}</b><small>${p.size ? '限 ' + esc(p.size) + '，' : ''}${p.only ? '只能點' + kind + '，不能單杯' : '也可以點單杯'}</small></div>
+      <span class="muted" style="font-size:12.5px">只能${kind}</span><button class="tog ${p.only ? 'on' : ''}" data-act="promo-only" data-type="${type}" data-i="${i}" aria-label="只能點${kind}"></button>
       <button class="mini del" data-act="promo-del" data-type="${type}" data-i="${i}" aria-label="移除">${I.x}</button></div>
-      ${psz.length ? `<div class="chips sm prm-sz"><span class="muted">${BOGO}限定</span>${psz.map(s => `<button class="chip ${p.size === s ? 'on' : ''}" data-act="promo-size" data-type="${type}" data-i="${i}" data-v="${esc(s)}">${esc(s)}</button>`).join('')}</div>` : ''}</div>`;
+      <div class="chips sm prm-sz"><span class="muted">方式</span><button class="chip ${p.gift ? '' : 'on'}" data-act="promo-kind" data-type="${type}" data-i="${i}" data-v="0">${BOGO}</button><button class="chip ${p.gift ? 'on' : ''}" data-act="promo-kind" data-type="${type}" data-i="${i}" data-v="1">買 A 送 B</button></div>
+      ${psz.length ? `<div class="chips sm prm-sz"><span class="muted">${p.gift ? '買的' : BOGO}限定</span>${psz.map(s => `<button class="chip ${p.size === s ? 'on' : ''}" data-act="promo-size" data-type="${type}" data-i="${i}" data-v="${esc(s)}">${esc(s)}</button>`).join('')}</div>` : ''}
+      ${p.gift ? `<div class="tpick psel"><span class="muted" style="flex:none;font-size:13px">送</span><select class="field" data-f="opgift" data-type="${type}" data-i="${i}" aria-label="送的品項"><option value="">選要送的品項…</option>${cats.map(c => {
+        const os = items.filter(m => (m.cat || '其他') === c);
+        return `<optgroup label="${esc(c)}">${os.map(m => `<option value="${items.indexOf(m)}" ${gmn === m ? 'selected' : ''}>${esc(m.item)}</option>`).join('')}</optgroup>`;
+      }).join('')}</select></div>
+      ${gsz.length ? `<div class="chips sm prm-sz"><span class="muted">送的容量</span>${gsz.map(s => `<button class="chip ${p.gift.size === s ? 'on' : ''}" data-act="promo-gsize" data-type="${type}" data-i="${i}" data-v="${esc(s)}">${esc(s)}</button>`).join('')}</div>` : ''}` : ''}</div>`;
     }).join('')}
-    ${F.promos.length ? '' : `<div class="hint">${BOGO}：一組 2 杯同款同容量，付原價（不打折）。</div>`}
+    ${F.promos.length ? '' : `<div class="hint">${BOGO}：一組 2 杯同款同容量，付原價（不打折）。買 A 送 B：付 A 的原價，送一杯你指定的 B。</div>`}
   </div>`;
 }
 function aOpenHtml() {
@@ -1962,7 +2020,7 @@ function aGroupsHtml() {
   const gs = S.data.groups.slice().sort((a, b) => b.deadline - a.deadline);
   if (!gs.length) return `<div class="empty-st" style="margin-top:14px"><b>最近 3 天沒有開過團</b><p>到「開團」開一團吧。</p></div>`;
   return `<div class="panel" style="padding-block:4px">${gs.map(g => `<div class="arow">
-    <div class="t"><b>${esc(g.shop)}</b><small class="num">${fmtDate(g.deadline)} ${fmtTime(g.deadline)} 截止 · ${isOpen(g) ? '進行中' : '已截止'} · ${ordersOf(g.id).length} 人${(g.promos || []).length ? ' · ' + BOGO + '：' + esc(g.promos.map(p => p.item).join('、')) : ''}</small></div>
+    <div class="t"><b>${esc(g.shop)}</b><small class="num">${fmtDate(g.deadline)} ${fmtTime(g.deadline)} 截止 · ${isOpen(g) ? '進行中' : '已截止'} · ${ordersOf(g.id).length} 人${(g.promos || []).length ? (ps => ' · ' + ps.badge + '：' + esc(ps.text))(promoSummary(g.shop, g.promos)) : ''}</small></div>
     ${isOpen(g) ? `<button class="sbtn" data-act="grp-op" data-op="extend" data-id="${esc(g.id)}">延 15 分</button><button class="sbtn" data-act="grp-op" data-op="close" data-id="${esc(g.id)}">結單</button>`
       : `<button class="sbtn" data-act="grp-op" data-op="reopen" data-id="${esc(g.id)}">重開 30 分</button>`}
     <button class="mini del" data-act="grp-del" data-id="${esc(g.id)}" aria-label="刪除這一團">${I.x}</button></div>`).join('')}</div>
@@ -2212,8 +2270,9 @@ const ADMIN_ACT = {
   'o-pick': async el => {
     const t = el.dataset.type, name = el.dataset.shop, shop = S.data.shops.find(s => s.name === name);
     // 今天公休只提醒，不擋：店家可能臨時有營業
-    if (shop && closedToday(shop) && !(await confirmSheet('這家今天公休', '「' + name + '」' + closedText(shop) + '，確定要開嗎？', '還是要開'))) return;
-    const F = S.openForm[t]; F.shop = name; F.q = ''; F.promos = []; repaintOpen();
+    const F = S.openForm[t], w = DAY_WORD[F.day || 0];
+    if (shop && closedOn(shop, F.day) && !(await confirmSheet('這家' + w + '公休', '「' + name + '」' + closedText(shop) + '，確定要開' + w + '的團嗎？', '還是要開'))) return;
+    F.shop = name; F.q = ''; F.promos = []; repaintOpen();
   },
   'o-clear': el => { const F = S.openForm[el.dataset.type]; F.shop = ''; F.promos = []; repaintOpen(); focusLater(`[data-f="osq"][data-type="${el.dataset.type}"]`); },
   'promo-add': el => {
@@ -2222,14 +2281,27 @@ const ADMIN_ACT = {
     const m = menuOf(S.openForm[t].shop)[+v]; if (!m) return;
     S.openForm[t].promos.push({ item: m.item, cat: m.cat, only: true, size: m.priceL ? sizesOf(m)[0] : '' }); repaintOpen();   // 預設限第一種容量（通常是 L）
   },
+  'o-day': el => {
+    const F = S.openForm[el.dataset.type]; F.day = +el.dataset.v;
+    const shop = F.shop && S.data.shops.find(s => s.name === F.shop);
+    if (shop && closedOn(shop, F.day)) toast('提醒：「' + F.shop + '」' + DAY_WORD[F.day] + '公休');
+    repaintOpen();
+  },
+  'promo-kind': el => {
+    const p = S.openForm[el.dataset.type].promos[+el.dataset.i];
+    if (el.dataset.v === '1') { if (!p.gift) p.gift = { item: '', cat: '', size: '' }; } else delete p.gift;
+    repaintOpen();
+  },
+  'promo-gsize': el => { S.openForm[el.dataset.type].promos[+el.dataset.i].gift.size = el.dataset.v; repaintOpen(); },
   'promo-size': el => { S.openForm[el.dataset.type].promos[+el.dataset.i].size = el.dataset.v; repaintOpen(); },
   'promo-only': el => { const p = S.openForm[el.dataset.type].promos[+el.dataset.i]; p.only = !p.only; repaintOpen(); },
   'promo-del': el => { S.openForm[el.dataset.type].promos.splice(+el.dataset.i, 1); repaintOpen(); },
   'do-open': async el => {
     const secs = OTYPES.map(t => S.openForm[t]).filter(F => F.shop);
     for (const F of secs) {
-      const d = new Date(); d.setHours(F.h, F.m, 0, 0); F.dl = d.getTime();
+      const d = dayAfter(F.day || 0); d.setHours(F.h, F.m, 0, 0); F.dl = d.getTime();
       if (F.dl <= now()) return toast('「' + F.shop + '」的截止時間已經過了，請選晚一點');
+      if (F.promos.some(p => p.gift && !p.gift.item)) return toast('「' + F.shop + '」的買 A 送 B 還沒選要送什麼');
     }
     el.disabled = true;
     const ids = [], names = secs.map(F => F.shop);
@@ -2359,6 +2431,10 @@ document.addEventListener('input', e => {
     else if (f === 'oh') F.h = +t.value;
     else if (f === 'om') F.m = +t.value;
     else if (f === 'onote') F.note = t.value;
+    else if (f === 'opgift') {   // 買 A 送 B 選了要送的品項：預設送第一種容量
+      const p = F.promos[+t.dataset.i], m = menuOf(F.shop)[+t.value];
+      if (p && p.gift) { p.gift = m ? { item: m.item, cat: m.cat, size: m.priceL ? sizesOf(m)[0] : '' } : { item: '', cat: '', size: '' }; repaintOpen(); }
+    }
     return;
   }
   let o = null;
@@ -2412,10 +2488,10 @@ async function copyText(txt) {
 const SITE = location.origin + location.pathname.replace(/index\.html$/, '');
 const groupUrl = g => SITE + '#g-' + g.id;
 function inviteText(gs) {
-  const out = ['今天揪團囉，截止前都能點、能改：'];
+  const out = [(gs.every(g => sameDay(g.deadline, now())) ? '今天' : '') + '揪團囉，截止前都能點、能改：'];
   gs.forEach(g => {
-    out.push('', `【${g.shop}】${fmtTime(g.deadline)} 截止`);
-    if ((g.promos || []).length) out.push(BOGO + '：' + g.promos.map(p => labelOf(g.shop, p) + (p.size ? ' ' + p.size : '')).join('、'));
+    out.push('', `【${g.shop}】${dayPrefix(g.deadline)}${fmtTime(g.deadline)} 截止`);
+    if ((g.promos || []).length) { const ps = promoSummary(g.shop, g.promos); out.push(ps.badge + '：' + ps.text); }
     if (g.note) out.push(g.note);
   });
   out.push('', '點餐 👉 ' + (gs.length === 1 ? groupUrl(gs[0]) : SITE));
